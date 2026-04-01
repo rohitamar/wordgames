@@ -1,0 +1,17 @@
+{
+  "name": "openguesser",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev --workspace @openguesser/web",
+    "dev:server": "npm run dev --workspace @openguesser/server",
+    "build": "npm run build --workspaces",
+    "lint": "npm run lint --workspaces",
+    "typecheck": "npm run typecheck --workspaces"
+  }
+}
+

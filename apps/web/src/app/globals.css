@@ -1,0 +1,32 @@
+@import "mapillary-js/dist/mapillary.css";
+@import "maplibre-gl/dist/maplibre-gl.css";
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --background: #08131d;
+  --surface: rgba(8, 19, 29, 0.82);
+  --foreground: #f7fbff;
+  --accent: #63d2ff;
+  --accent-strong: #0aa0d9;
+  --line: rgba(255, 255, 255, 0.12);
+}
+
+html,
+body {
+  min-height: 100%;
+  background:
+    radial-gradient(circle at top, rgba(99, 210, 255, 0.18), transparent 32%),
+    linear-gradient(180deg, #061018 0%, #0b1822 100%);
+  color: var(--foreground);
+}
+
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
