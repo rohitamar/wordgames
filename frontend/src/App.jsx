@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 
 export default function App() {
+    const apiBaseUrl =
+        import.meta.env.VITE_API_BASE_URL ||
+        (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin);
+    const websocketBaseUrl =
+        import.meta.env.VITE_WS_BASE_URL ||
+        (import.meta.env.DEV
+            ? "ws://localhost:8000"
+            : `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}`);
     const [usernameInput, setUsernameInput] = useState("");
     const [submittedUsername, setSubmittedUsername] = useState("");
     const [isEditing, setIsEditing] = useState(true);
@@ -17,10 +25,14 @@ export default function App() {
     const [guessLog, setGuessLog] = useState([]);
     const [guessInput, setGuessInput] = useState("");
     const socketRef = useRef(null);
+    const usernameInputRef = useRef(null);
+    const guessInputRef = useRef(null);
+    const logPanelRef = useRef(null);
     const lastLoggedGuessTimestampRef = useRef(null);
+    const previousWinnerRef = useRef("");
 
     useEffect(() => {
-        const eventSource = new EventSource("http://localhost:8000/lobby/stream");
+        const eventSource = new EventSource(`${apiBaseUrl}/lobby/stream`);
 
         eventSource.onmessage = (event) => {
             try {
@@ -41,7 +53,7 @@ export default function App() {
         return () => {
             eventSource.close();
         };
-    }, []);
+    }, [apiBaseUrl]);
 
     const closeSocket = () => {
         const socket = socketRef.current;
@@ -86,6 +98,22 @@ export default function App() {
         }
     }, [currentGuess, currentTurn, gameStarted, submittedUsername]);
 
+    const isCurrentTurn = submittedUsername !== "" && submittedUsername === currentTurn;
+    const activeTypingLabel = currentGuess || "Nothing yet";
+    const showRoundState = gameStarted || Boolean(winner);
+    const canStartGame = connectionStatus === "connected" && lobbyUsers.length >= 2;
+    const showStartButton = !gameStarted;
+
+    useEffect(() => {
+        if (previousWinnerRef.current && gameStarted) {
+            setGuessLog([]);
+            setLastGuess(null);
+            lastLoggedGuessTimestampRef.current = null;
+        }
+
+        previousWinnerRef.current = winner;
+    }, [gameStarted, winner]);
+
     useEffect(() => {
         if (!lastGuess?.timestamp) {
             return;
@@ -120,13 +148,50 @@ export default function App() {
         ]);
     }, [lastGuess]);
 
+    useEffect(() => {
+        if (!isEditing) {
+            return;
+        }
+
+        const input = usernameInputRef.current;
+        if (!input) {
+            return;
+        }
+
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+    }, [isEditing, usernameInput]);
+
+    useEffect(() => {
+        if (!isCurrentTurn || winner) {
+            return;
+        }
+
+        const input = guessInputRef.current;
+        if (!input) {
+            return;
+        }
+
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+    }, [guessInput, isCurrentTurn, winner]);
+
+    useEffect(() => {
+        const panel = logPanelRef.current;
+        if (!panel) {
+            return;
+        }
+
+        panel.scrollTop = panel.scrollHeight;
+    }, [guessLog]);
+
     const connectSocket = (trimmedUsername) => {
         closeSocket();
         resetGameView();
         setConnectionStatus("connecting");
 
         const socket = new WebSocket(
-            `ws://localhost:8000/ws/${encodeURIComponent(trimmedUsername)}`
+            `${websocketBaseUrl}/ws/${encodeURIComponent(trimmedUsername)}`
         );
         socketRef.current = socket;
 
@@ -263,12 +328,6 @@ export default function App() {
         socket.send(JSON.stringify({ type: "submit_guess", value: guess }));
     };
 
-    const isCurrentTurn = submittedUsername !== "" && submittedUsername === currentTurn;
-    const activeTypingLabel = currentGuess || "Nothing yet";
-    const showRoundState = gameStarted || Boolean(winner);
-    const canStartGame = connectionStatus === "connected" && lobbyUsers.length >= 2;
-    const showStartButton = !gameStarted;
-
     return (
         <main style={styles.page}>
             <h1 style={styles.cornerTitle}>Word Games</h1>
@@ -299,6 +358,7 @@ export default function App() {
                             <input
                                 autoComplete="off"
                                 autoFocus
+                                ref={usernameInputRef}
                                 onChange={(event) => setUsernameInput(event.target.value)}
                                 placeholder="Username"
                                 style={styles.input}
@@ -371,6 +431,7 @@ export default function App() {
                     {!winner ? (
                         <form onSubmit={handleGuessSubmit} style={styles.guessForm}>
                             <input
+                                autoFocus={isCurrentTurn}
                                 disabled={!isCurrentTurn}
                                 onChange={handleGuessChange}
                                 placeholder={
@@ -378,6 +439,7 @@ export default function App() {
                                         ? "Type a rhyming word"
                                         : "Waiting for the active player"
                                 }
+                                ref={guessInputRef}
                                 style={styles.input}
                                 value={guessInput}
                             />
@@ -394,7 +456,7 @@ export default function App() {
                         </form>
                     ) : null}
 
-                    <section style={styles.logPanel}>
+                    <section ref={logPanelRef} style={styles.logPanel}>
                         {guessLog.length > 0 ? (
                             guessLog.map((entry) => (
                                 <p key={entry.timestamp} style={styles.logEntry}>
