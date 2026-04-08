@@ -1,9 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
 export default function App() {
-    const apiBaseUrl =
-        import.meta.env.VITE_API_BASE_URL ||
-        (import.meta.env.DEV ? "http://localhost:8000" : window.location.origin);
     const websocketBaseUrl =
         import.meta.env.VITE_WS_BASE_URL ||
         (import.meta.env.DEV
@@ -12,8 +9,10 @@ export default function App() {
     const [usernameInput, setUsernameInput] = useState("");
     const [submittedUsername, setSubmittedUsername] = useState("");
     const [isEditing, setIsEditing] = useState(true);
-    const [connectionStatus, setConnectionStatus] = useState("disconnected");
+    const [connectionStatus, setConnectionStatus] = useState("connecting");
+    const [statusMessage, setStatusMessage] = useState("");
     const [lobbyUsers, setLobbyUsers] = useState([]);
+    const [canStart, setCanStart] = useState(false);
     const [gameStarted, setGameStarted] = useState(false);
     const [promptWord, setPromptWord] = useState("");
     const [currentTurn, setCurrentTurn] = useState("");
@@ -28,32 +27,9 @@ export default function App() {
     const usernameInputRef = useRef(null);
     const guessInputRef = useRef(null);
     const logPanelRef = useRef(null);
+    const pendingUsernameRef = useRef("");
     const lastLoggedGuessTimestampRef = useRef(null);
     const previousWinnerRef = useRef("");
-
-    useEffect(() => {
-        const eventSource = new EventSource(`${apiBaseUrl}/lobby/stream`);
-
-        eventSource.onmessage = (event) => {
-            try {
-                const parsedMessage = JSON.parse(event.data);
-
-                if (Array.isArray(parsedMessage.users)) {
-                    setLobbyUsers(parsedMessage.users);
-                }
-            } catch (error) {
-                console.error("Failed to parse lobby stream message:", error);
-            }
-        };
-
-        eventSource.onerror = (error) => {
-            console.error("Lobby stream error:", error);
-        };
-
-        return () => {
-            eventSource.close();
-        };
-    }, [apiBaseUrl]);
 
     const closeSocket = () => {
         const socket = socketRef.current;
@@ -66,11 +42,12 @@ export default function App() {
         try {
             socket.close();
         } catch {
-            // Ignore close errors during reconnects or unmount.
+            // Ignore close errors during cleanup.
         }
     };
 
     const resetGameView = () => {
+        setCanStart(false);
         setGameStarted(false);
         setPromptWord("");
         setCurrentTurn("");
@@ -85,10 +62,112 @@ export default function App() {
     };
 
     useEffect(() => {
+        const socket = new WebSocket(`${websocketBaseUrl}/ws`);
+        socketRef.current = socket;
+
+        socket.onopen = () => {
+            if (socketRef.current !== socket) {
+                return;
+            }
+
+            setConnectionStatus("connected");
+            setStatusMessage("");
+        };
+
+        socket.onmessage = (event) => {
+            if (socketRef.current !== socket) {
+                return;
+            }
+
+            const messageText =
+                typeof event.data === "string" ? event.data : String(event.data);
+
+            try {
+                const parsedMessage = JSON.parse(messageText);
+
+                if (parsedMessage.type === "error") {
+                    pendingUsernameRef.current = "";
+                    setStatusMessage(parsedMessage.message || "Something went wrong.");
+                    return;
+                }
+
+                if (parsedMessage.type !== "state") {
+                    return;
+                }
+
+                const nextUsername =
+                    typeof parsedMessage.self_username === "string"
+                        ? parsedMessage.self_username
+                        : "";
+
+                setSubmittedUsername(nextUsername);
+                setLobbyUsers(Array.isArray(parsedMessage.users) ? parsedMessage.users : []);
+                setCanStart(Boolean(parsedMessage.can_start));
+                setGameStarted(Boolean(parsedMessage.game_started));
+                setPromptWord(parsedMessage.prompt_word ?? "");
+                setCurrentTurn(parsedMessage.current_turn ?? "");
+                setCurrentGuess(parsedMessage.current_guess ?? "");
+                setSecondsLeft(
+                    Number.isFinite(parsedMessage.seconds_left)
+                        ? parsedMessage.seconds_left
+                        : 15
+                );
+                setActivePlayers(
+                    Array.isArray(parsedMessage.active_players)
+                        ? parsedMessage.active_players
+                        : []
+                );
+                setWinner(parsedMessage.winner ?? "");
+                setLastGuess(parsedMessage.last_guess ?? null);
+
+                if (!nextUsername) {
+                    setIsEditing(true);
+                    setStatusMessage("");
+                    return;
+                }
+
+                if (
+                    pendingUsernameRef.current &&
+                    nextUsername === pendingUsernameRef.current
+                ) {
+                    pendingUsernameRef.current = "";
+                    setUsernameInput(nextUsername);
+                    setIsEditing(false);
+                }
+
+                setStatusMessage("");
+            } catch {
+                setStatusMessage("Received an unreadable server message.");
+            }
+        };
+
+        socket.onclose = () => {
+            if (socketRef.current !== socket) {
+                return;
+            }
+
+            socketRef.current = null;
+            pendingUsernameRef.current = "";
+            setConnectionStatus("disconnected");
+            setSubmittedUsername("");
+            setLobbyUsers([]);
+            setStatusMessage("Disconnected from server.");
+            setIsEditing(true);
+            resetGameView();
+        };
+
+        socket.onerror = () => {
+            if (socketRef.current !== socket) {
+                return;
+            }
+
+            setStatusMessage("WebSocket connection error.");
+        };
+
         return () => {
             closeSocket();
         };
-    }, []);
+    }, [websocketBaseUrl]);
 
     useEffect(() => {
         if (!gameStarted || currentTurn !== submittedUsername) {
@@ -101,7 +180,8 @@ export default function App() {
     const isCurrentTurn = submittedUsername !== "" && submittedUsername === currentTurn;
     const activeTypingLabel = currentGuess || "Nothing yet";
     const showRoundState = gameStarted || Boolean(winner);
-    const canStartGame = connectionStatus === "connected" && lobbyUsers.length >= 2;
+    const canStartGame =
+        connectionStatus === "connected" && Boolean(submittedUsername) && canStart;
     const showStartButton = !gameStarted;
 
     useEffect(() => {
@@ -185,89 +265,15 @@ export default function App() {
         panel.scrollTop = panel.scrollHeight;
     }, [guessLog]);
 
-    const connectSocket = (trimmedUsername) => {
-        closeSocket();
-        resetGameView();
-        setConnectionStatus("connecting");
+    const sendSocketMessage = (payload) => {
+        const socket = socketRef.current;
+        if (!socket || socket.readyState !== WebSocket.OPEN) {
+            setStatusMessage("The connection is not ready.");
+            return false;
+        }
 
-        const socket = new WebSocket(
-            `${websocketBaseUrl}/ws/${encodeURIComponent(trimmedUsername)}`
-        );
-        socketRef.current = socket;
-
-        socket.onopen = () => {
-            if (socketRef.current !== socket) {
-                return;
-            }
-
-            setConnectionStatus("connected");
-            setSubmittedUsername(trimmedUsername);
-            setIsEditing(false);
-        };
-
-        socket.onmessage = (event) => {
-            if (socketRef.current !== socket) {
-                return;
-            }
-
-            const messageText =
-                typeof event.data === "string" ? event.data : String(event.data);
-
-            console.log("WebSocket message:", event.data);
-
-            try {
-                const parsedMessage = JSON.parse(messageText);
-
-                if (
-                    parsedMessage.type === "lobby_state" &&
-                    Array.isArray(parsedMessage.users)
-                ) {
-                    setLobbyUsers(parsedMessage.users);
-                }
-
-                if (parsedMessage.type === "game_state") {
-                    setLobbyUsers(
-                        Array.isArray(parsedMessage.users) ? parsedMessage.users : []
-                    );
-                    setGameStarted(Boolean(parsedMessage.game_started));
-                    setPromptWord(parsedMessage.prompt_word ?? "");
-                    setCurrentTurn(parsedMessage.current_turn ?? "");
-                    setCurrentGuess(parsedMessage.current_guess ?? "");
-                    setSecondsLeft(
-                        Number.isFinite(parsedMessage.seconds_left)
-                            ? parsedMessage.seconds_left
-                            : 15
-                    );
-                    setActivePlayers(
-                        Array.isArray(parsedMessage.active_players)
-                            ? parsedMessage.active_players
-                            : []
-                    );
-                    setWinner(parsedMessage.winner ?? "");
-                    setLastGuess(parsedMessage.last_guess ?? null);
-                }
-            } catch {
-                // Ignore malformed messages in the MVP client.
-            }
-        };
-
-        socket.onclose = () => {
-            if (socketRef.current !== socket) {
-                return;
-            }
-
-            socketRef.current = null;
-            setConnectionStatus("disconnected");
-            resetGameView();
-        };
-
-        socket.onerror = (error) => {
-            if (socketRef.current !== socket) {
-                return;
-            }
-
-            console.error("WebSocket error:", error);
-        };
+        socket.send(JSON.stringify(payload));
+        return true;
     };
 
     const handleSubmit = (event) => {
@@ -275,58 +281,93 @@ export default function App() {
 
         const trimmedUsername = usernameInput.trim();
         if (!trimmedUsername) {
+            setStatusMessage("Username is required.");
             return;
         }
 
-        connectSocket(trimmedUsername);
+        pendingUsernameRef.current = trimmedUsername;
+        if (
+            sendSocketMessage({
+                type: "set_username",
+                value: trimmedUsername,
+            })
+        ) {
+            setStatusMessage("Saving username...");
+        }
     };
 
     const handleEdit = () => {
+        pendingUsernameRef.current = "";
         setUsernameInput(submittedUsername);
+        setStatusMessage("");
         setIsEditing(true);
     };
 
     const handleStartGame = () => {
-        const socket = socketRef.current;
-        if (!socket || socket.readyState !== WebSocket.OPEN) {
+        if (!canStartGame) {
             return;
         }
 
-        socket.send(JSON.stringify({ type: "start_game" }));
+        sendSocketMessage({ type: "start_game" });
     };
 
     const handleGuessChange = (event) => {
         const nextGuess = event.target.value;
         setGuessInput(nextGuess);
 
-        const socket = socketRef.current;
-        if (
-            !socket ||
-            socket.readyState !== WebSocket.OPEN ||
-            submittedUsername !== currentTurn
-        ) {
+        if (submittedUsername !== currentTurn) {
             return;
         }
 
-        socket.send(JSON.stringify({ type: "guess_input", value: nextGuess }));
+        sendSocketMessage({ type: "guess_input", value: nextGuess });
     };
 
     const handleGuessSubmit = (event) => {
         event.preventDefault();
 
-        const socket = socketRef.current;
         const guess = guessInput.trim();
-        if (
-            !socket ||
-            socket.readyState !== WebSocket.OPEN ||
-            submittedUsername !== currentTurn ||
-            !guess
-        ) {
+        if (submittedUsername !== currentTurn || !guess) {
             return;
         }
 
-        socket.send(JSON.stringify({ type: "submit_guess", value: guess }));
+        sendSocketMessage({ type: "submit_guess", value: guess });
     };
+
+    const renderUsernameControls = () =>
+        isEditing ? (
+            <form onSubmit={handleSubmit} style={styles.form}>
+                <input
+                    autoComplete="off"
+                    autoFocus
+                    ref={usernameInputRef}
+                    onChange={(event) => setUsernameInput(event.target.value)}
+                    placeholder="Username"
+                    style={styles.input}
+                    value={usernameInput}
+                />
+                <button
+                    disabled={connectionStatus !== "connected"}
+                    style={{
+                        ...styles.button,
+                        ...(connectionStatus !== "connected" ? styles.buttonDisabled : {}),
+                    }}
+                    type="submit"
+                >
+                    Save
+                </button>
+            </form>
+        ) : (
+            <div style={styles.usernameRow}>
+                <span style={styles.usernameText}>{submittedUsername}</span>
+                <button
+                    onClick={handleEdit}
+                    style={{ ...styles.button, ...styles.editButton }}
+                    type="button"
+                >
+                    Edit
+                </button>
+            </div>
+        );
 
     return (
         <main style={styles.page}>
@@ -353,33 +394,9 @@ export default function App() {
 
             {!gameStarted && !winner ? (
                 <section style={styles.card}>
-                    {isEditing ? (
-                        <form onSubmit={handleSubmit} style={styles.form}>
-                            <input
-                                autoComplete="off"
-                                autoFocus
-                                ref={usernameInputRef}
-                                onChange={(event) => setUsernameInput(event.target.value)}
-                                placeholder="Username"
-                                style={styles.input}
-                                value={usernameInput}
-                            />
-                            <button style={styles.button} type="submit">
-                                Submit
-                            </button>
-                        </form>
-                    ) : (
-                        <div style={styles.usernameRow}>
-                            <span style={styles.usernameText}>{submittedUsername}</span>
-                            <button
-                                onClick={handleEdit}
-                                style={{ ...styles.button, ...styles.editButton }}
-                                type="button"
-                            >
-                                Edit
-                            </button>
-                        </div>
-                    )}
+                    {renderUsernameControls()}
+
+                    {statusMessage ? <p style={styles.statusText}>{statusMessage}</p> : null}
 
                     <button
                         disabled={!canStartGame}
@@ -396,6 +413,9 @@ export default function App() {
                 </section>
             ) : (
                 <section style={styles.gameCard}>
+                    {renderUsernameControls()}
+                    {statusMessage ? <p style={styles.statusText}>{statusMessage}</p> : null}
+
                     {winner ? (
                         <p style={styles.winnerText}>{winner} wins the round.</p>
                     ) : null}
@@ -605,6 +625,11 @@ const styles = {
         color: "#444444",
         textAlign: "center",
         wordBreak: "break-word",
+    },
+    statusText: {
+        margin: 0,
+        fontSize: 14,
+        color: "#666666",
     },
     promptWord: {
         margin: 0,
